@@ -3,7 +3,6 @@ from datetime import datetime
 
 DB_PATH = "queuectl.db"
 
-# Initialize DB and create table if it doesn’t exist
 def init_db(db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -21,11 +20,9 @@ def init_db(db_path=DB_PATH):
     conn.commit()
     conn.close()
 
-# Helper: Get current UTC time as string
 def current_time():
     return datetime.utcnow().isoformat() + "Z"
 
-# enqueu : Add new job to the database
 def add_job(job):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -40,4 +37,3 @@ def add_job(job):
     ))
     conn.commit()
     conn.close()
-
