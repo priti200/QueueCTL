@@ -1,6 +1,40 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Pytest cache
+.pytest_cache/
+
+# SQLite DB and logs
+queuectl.db
+*.db
+/data/
+job_logs/
+*.log
+
+# Editor directories and system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# dotenv
+.env
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
 
 # SQLite DB and job logs
 queuectl.db
