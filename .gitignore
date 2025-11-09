@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# SQLite DB and job logs
+queuectl.db
+job_logs/
+
+# Virtual environment
+venv/
+
+# Editor files
+.vscode/
+*.swp
+
+# pytest cache
+.pytest_cache/
+
+# OS files
+Thumbs.db
+desktop.ini
