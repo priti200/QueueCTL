@@ -1,6 +1,17 @@
 import click
 import uuid
-from job_storage import init_db, add_job, current_time
+import multiprocessing
+import threading
+import time
+import os
+import sys
+import signal
+import subprocess
+
+from job_storage import init_db, add_job, current_time, list_jobs_by_state, get_stats
+import worker as worker_mod
+import dead_letter_queue as dlq_mod
+import config as cfg
 
 @click.group()
 def cli():
@@ -36,6 +47,160 @@ def enqueue(job_id, command, max_retries):
         click.echo(f"Enqueued job: {job_data['id']}")
     except Exception as e:
         click.echo(f"Failed to enqueue job: {e}", err=True)
+
+
+
+
+
+@cli.command(name='worker-run')
+@click.option('--count', default=1, type=int, help='Number of workers')
+@click.option('--poll-interval', default=1.0, type=float)
+@click.option('--use-processes', default=False, is_flag=True, help='Spawn multiple processes instead of threads')
+def worker_run(count, poll_interval, use_processes):
+    """Internal command: run workers in foreground. Intended for use by --background launcher."""
+    worker_mod.start_workers(count=count, poll_interval=poll_interval, use_processes=use_processes)
+
+
+@cli.command(name='worker-start')
+@click.option('--count', default=1, type=int, help='Number of worker processes/threads to start (default 1)')
+@click.option('--poll-interval', default=1.0, type=float, help='Polling interval seconds')
+@click.option('--background', is_flag=True, default=False, help='Start worker(s) in background (detached)')
+@click.option('--use-processes', is_flag=True, default=False, help='Run each worker in a separate process')
+def worker_start_background(count, poll_interval, background, use_processes):
+    """Start worker(s). By default runs in foreground; use --background to spawn a detached process and write PID file."""
+    pidfile = os.path.join(os.getcwd(), 'queuectl.pid')
+    if not background:
+        click.echo(f"Starting {count} worker(s) in foreground. Press Ctrl+C to stop.")
+        try:
+            worker_mod.start_workers(count=count, poll_interval=poll_interval, use_processes=use_processes)
+        except KeyboardInterrupt:
+            click.echo("Stopping workers...")
+        return
+
+    # spawn a detached background process that runs 'worker-run'
+    python = sys.executable
+    cmd = [python, os.path.abspath(__file__), 'worker-run', '--count', str(count), '--poll-interval', str(poll_interval)]
+    if use_processes:
+        cmd.append('--use-processes')
+
+    # platform-specific detach
+    creationflags = 0
+    popen_kwargs = {}
+    if os.name == 'nt':
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        creationflags = 0x00000008 | 0x00000200
+        popen_kwargs['creationflags'] = creationflags
+        popen_kwargs['close_fds'] = True
+    else:
+        popen_kwargs['start_new_session'] = True
+
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **popen_kwargs)
+    # write pid to pidfile
+    with open(pidfile, 'w') as f:
+        f.write(str(p.pid))
+    click.echo(f"Started background workers (PID {p.pid}), pidfile={pidfile}")
+
+
+@cli.command(name='worker-stop')
+def worker_stop():
+    pidfile = os.path.join(os.getcwd(), 'queuectl.pid')
+    if not os.path.exists(pidfile):
+        click.echo('No pidfile found; are workers running?')
+        return
+    try:
+        with open(pidfile, 'r') as f:
+            pid = int(f.read().strip())
+    except Exception as e:
+        click.echo(f'Failed to read pidfile: {e}', err=True)
+        return
+
+    try:
+        # try a graceful terminate
+        os.kill(pid, signal.SIGTERM)
+        click.echo(f'Sent SIGTERM to PID {pid}')
+    except Exception:
+        # fallback to taskkill on Windows
+        if os.name == 'nt':
+            try:
+                subprocess.check_call(['taskkill', '/PID', str(pid), '/F'])
+                click.echo(f'Killed PID {pid} using taskkill')
+            except Exception as e:
+                click.echo(f'Failed to kill process {pid}: {e}', err=True)
+        else:
+            click.echo(f'Failed to kill process {pid}', err=True)
+
+    try:
+        os.remove(pidfile)
+    except Exception:
+        pass
+
+
+@cli.command()
+@click.option('--state', default=None, help='Filter by state (pending, processing, completed, failed, dead)')
+def list(state):
+    """List jobs, optionally filtered by state."""
+    jobs = list_jobs_by_state(state)
+    if not jobs:
+        click.echo("No jobs found.")
+        return
+    for j in jobs:
+        click.echo(f"{j['id']} | {j['state']} | attempts={j['attempts']}/{j['max_retries']} | cmd={j['command']} | next_run={j.get('next_run_at')}")
+
+
+@cli.command()
+def status():
+    """Show summary of job states."""
+    stats = get_stats()
+    click.echo("Job counts by state:")
+    for k, v in stats.items():
+        click.echo(f"  {k}: {v}")
+
+
+@cli.group()
+def dlq():
+    """Dead Letter Queue commands."""
+    pass
+
+
+@dlq.command('list')
+def dlq_list():
+    jobs = dlq_mod.list_dead()
+    if not jobs:
+        click.echo('DLQ empty')
+        return
+    for j in jobs:
+        click.echo(f"{j['id']} | attempts={j['attempts']}/{j['max_retries']} | cmd={j['command']}")
+
+
+@dlq.command('retry')
+@click.argument('job_id')
+def dlq_retry(job_id):
+    ok = dlq_mod.retry(job_id)
+    if ok:
+        click.echo(f"Retried job {job_id}")
+    else:
+        click.echo(f"Job {job_id} not found in DLQ or retry failed", err=True)
+
+
+@cli.group()
+def config():
+    """Configuration commands."""
+    pass
+
+
+@config.command('set')
+@click.argument('key')
+@click.argument('value')
+def config_set(key, value):
+    cfg.set_config(key, value)
+    click.echo(f"Set {key} = {value}")
+
+
+@config.command('get')
+@click.argument('key')
+def config_get(key):
+    v = cfg.get_config(key)
+    click.echo(f"{key} = {v}")
 
 if __name__ == "__main__":
     cli()
