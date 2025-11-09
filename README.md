@@ -1,27 +1,47 @@
-# queuectl
 
->A minimal, CLI-first background job queue with workers, retries (exponential backoff), and a Dead Letter Queue (DLQ).
+# QueueCTL
 
-This repository implements a small production-friendly job queue in Python. It supports enqueueing shell commands, running multiple workers (threads/processes), retry/backoff, persistent storage (SQLite), and CLI controls for listing, DLQ inspection and retry, and configuration.
-
----
-
-## Quick links
-
-- CLI entrypoint: `main.py`
-- Worker logic: `worker.py`
-- Persistence: `job_storage.py` (SQLite)
-- DLQ wrapper: `dead_letter_queue.py`
-- Config: `config.py` (JSON file)
-- Tests: `tests/` (pytest)
+A minimal, CLI-first background job queue implemented in Python. QueueCTL supports enqueueing shell commands, running multiple workers, retry/backoff, persistent storage (SQLite), a Dead Letter Queue (DLQ), and a small set of CLI utilities for administration and inspection.
 
 ---
 
-## Requirements
+## Summary
+
+- Atomic job claiming to prevent double processing
+- Multiple worker modes (threaded or process-backed)
+- Exponential backoff retries and DLQ for permanently failed jobs
+- Scheduling (delay / run-at) and per-job timeouts
+- SQLite persistence with optional DB path override via `QUEUECTL_DB_PATH`
+
+Key files:
+- `main.py` - CLI entrypoint
+- `worker.py` - worker loop and runner
+- `job_storage.py` - SQLite persistence and claim logic
+- `dead_letter_queue.py` - thin DLQ helpers
+- `config.py` - JSON-backed configuration
+
+---
+
+## Project structure
+
+```
+queuectl/
+├── main.py
+├── worker.py
+├── job_storage.py
+├── dead_letter_queue.py
+├── config.py
+├── Dockerfile
+├── .gitignore
+└── tests/
+```
+
+---
+
+## Requirements & install
 
 - Python 3.8+ (tested on 3.10)
 - pip
-- Recommended: create and use a virtual environment
 
 Install dependencies:
 
@@ -29,174 +49,201 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
----
-
-## Setup
-
-Initialize the database (creates `queuectl.db` in the current working directory):
+Initialize the database (creates a sqlite DB at the current working directory by default):
 
 ```powershell
 python main.py init
 ```
 
-You can override the database path using the environment variable `QUEUECTL_DB_PATH`:
+To use a custom DB path, set the `QUEUECTL_DB_PATH` environment variable before running commands:
 
 ```powershell
 $env:QUEUECTL_DB_PATH = "C:\path\to\queuectl.db"
 python main.py init
 ```
 
-Config (defaults are stored in `queuectl_config.json`):
-- `max_retries` (default 3)
-- `backoff_base` (default 2)
-- `job_timeout` (seconds, default 0 meaning no timeout)
+---
 
-Set/get config with the CLI:
+## Quick start
+
+1. Enqueue a simple job:
 
 ```powershell
-python main.py config set backoff_base 2
-python main.py config get backoff_base
+python main.py enqueue --id demo-1 --command-file cmd.txt
+```
+
+2. Start a worker in the foreground (1 worker):
+
+```powershell
+python main.py worker-run --count 1
+```
+
+3. Check status and lists:
+
+```powershell
+python main.py status
+python main.py list --state pending
+```
+
+4. View job logs (PowerShell):
+
+```powershell
+Get-Content .\job_logs\demo-1.log -Tail 200
 ```
 
 ---
 
-## Usage examples
+## CLI reference
 
-Note about PowerShell quoting: commands containing semicolons or nested quotes can be tricky. Two robust approaches are:
+Enqueue:
 
-1. Put the script in a file and enqueue a simple `python file.py` command.
-2. Use the stop-parsing operator `--%` if you need to pass raw content (PowerShell specific).
+- `--id` - job id
+- `--command` - shell command to run
+- `--command-file` - read command string from a file (recommended on PowerShell)
+- `--job-file` - read a full job JSON payload from a file
+- `--max-retries` - override default max retries
+- `--delay` - schedule job to run after N seconds
+- `--run-at` - schedule job at ISO-8601 UTC timestamp
 
-Enqueue a job (example):
+Examples:
 
-```powershell
-python main.py enqueue --command "python -c 'print(\"hello\")'" --max-retries 2
-# or using a script file
-python main.py enqueue --command "python my_script.py" --max-retries 2
-```
-
-List pending jobs:
-
-```powershell
-python main.py list --state pending
-```
-
-Start workers in foreground (1 worker):
+PowerShell one-liner (use a command file to avoid quoting issues):
 
 ```powershell
-python main.py worker-start --count 1
+Set-Content -Path cmd.txt -Value "python -c 'print(\"hello from job\")'"
+python main.py enqueue --id demo-1 --command-file cmd.txt
 ```
 
-Start workers in the background (detached) and write a pidfile `queuectl.pid`:
+cmd.exe single-line example:
 
-```powershell
-python main.py worker-start --background --count 1
+```cmd
+python main.py enqueue --id demo-1 --command "python -c \"print('hello from job')\""
 ```
 
-Stop background workers (reads `queuectl.pid`):
+Worker management:
 
-```powershell
-python main.py worker-stop
-```
+- `python main.py worker-run --count N` - run N workers in foreground
+- `python main.py worker-start --count N` - (if supported) start background workers
+- `python main.py worker-stop` - stop background workers
 
-Dead Letter Queue (DLQ):
+DLQ:
 
-```powershell
-python main.py dlq list
-python main.py dlq retry <job_id>
-```
+- `python main.py dlq list`
+- `python main.py dlq retry <job_id>`
 
-Show job state counts:
+Config:
 
-```powershell
-python main.py status
-```
+- `python main.py config set <key> <value>`
+- `python main.py config get <key>`
 
-### New enqueue options
+Status & listing:
 
-These options were added to improve usability for complex commands and scheduling:
-
-- `--command-file PATH` — read the command string from a file (avoids shell quoting).
-- `--job-file PATH` — read a full job JSON payload (useful to supply id, command, max_retries, and scheduling fields).
-- `--delay SECONDS` — schedule the job to run after the given delay (seconds).
-- `--run-at TIMESTAMP` — schedule the job to run at an ISO UTC timestamp (e.g. 2025-11-09T12:00:00Z).
-
-Examples (PowerShell):
-
-```powershell
-# 1) Command file: write the command into a file and enqueue it
-Set-Content -Path cmd.txt -Value 'python -c "import sys; sys.exit(0)"'
-python main.py enqueue --command-file cmd.txt --max-retries 2
-
-# 2) Full job JSON from a file
-Set-Content -Path job.json -Value '{"id":"job-file-1","command":"python -c \"print(1)\"","max_retries":1}'
-python main.py enqueue --job-file job.json
-
-# 3) Schedule a command to run after 5 seconds
-python main.py enqueue --command "python my_script.py" --delay 5
-
-# 4) Schedule a job to run at a specific UTC timestamp
-python main.py enqueue --command "python my_script.py" --run-at 2025-11-09T12:00:00Z
-```
+- `python main.py status` - show counts by state
+- `python main.py list --state pending|processing|completed|dead`
 
 ---
 
 ## Job model
 
-Each job is stored with at least the following fields:
+Jobs are stored with these primary fields:
 
 ```json
 {
-  "id": "<uuid>",
-  "command": "python my_script.py",
-  "state": "pending|processing|completed|failed|dead",
+  "id": "<id>",
+  "command": "...",
+  "state": "pending|processing|completed|dead",
   "attempts": 0,
   "max_retries": 3,
-  "created_at": "2025-11-04T10:30:00Z",
-  "updated_at": "2025-11-04T10:30:00Z",
+  "created_at": "...",
+  "updated_at": "...",
   "next_run_at": null
 }
 ```
 
-Jobs that fail are retried with exponential backoff:
-
-```
-delay_seconds = backoff_base ** attempts
-```
-
-After `attempts > max_retries` the job is moved to state `dead` and will appear in the DLQ.
+Retries use exponential backoff: `delay_seconds = backoff_base ** attempts`.
 
 ---
 
-## Design & architecture (short)
+## Design & architecture
 
-- Persistence: SQLite (`queuectl.db`) with WAL mode enabled for better concurrency.
-- Claim model: workers perform an atomic `BEGIN IMMEDIATE` + `SELECT ... LIMIT 1` and `UPDATE` to mark `processing` to avoid duplicate processing.
-- Workers: `worker.py` provides both threaded workers and the ability to spawn process-based workers (`--use-processes`).
-- Command execution: `subprocess.run(..., shell=True)` with `capture_output` and optional `timeout` from config.
-- Logs: workers append command stdout/stderr to `job_logs/<job_id>.log`.
+- Persistence: SQLite (WAL mode enabled for better concurrency)
+- Claiming: atomic `BEGIN IMMEDIATE` + `SELECT ... LIMIT 1` + `UPDATE` to mark processing
+- Workers: thread-based workers; `worker.py` supports running multiple workers and an optional process-based mode
+- Execution: `subprocess.run(..., shell=True)` with `capture_output` and optional timeout from configuration
+- Logs: per-job append-only logs under `job_logs/` (stdout/stderr captured)
 
-Security note: commands are executed with `shell=True` and may be unsafe in untrusted environments. If you plan to run untrusted payloads, sandboxing is required.
+Security note: commands are executed using the shell. Do not enqueue untrusted commands without sandboxing.
 
 ---
 
 ## Testing
 
-This project includes pytest tests under `tests/`.
-
-Run the full test suite (recommended inside a virtualenv):
+Run tests with pytest:
 
 ```powershell
 pip install -r requirements.txt
 python -m pytest -q
 ```
 
-The tests cover:
-- Basic job completion
-- Failed job retry and DLQ movement
-- Multi-worker concurrency (no duplicate processing)
-- CLI integration tests that exercise enqueue, DLQ retry, and timeout behavior
-
-If you run tests on Windows PowerShell, the README examples above show how to quote commands safely.
+Tests include smoke and integration tests that cover job success, retries and DLQ behavior, file-based enqueue, and scheduling.
 
 ---
+
+## Configuration
+
+Default keys (configured via `queuectl_config.json`):
+
+- `max_retries` (default 3)
+- `backoff_base` (default 2)
+- `job_timeout` (seconds, default 0 → no timeout)
+
+Use the CLI to get/set configuration values.
+
+---
+
+## Advanced usage
+
+- Docker: a `Dockerfile` is provided. Build the image and mount a host folder at `/data` to persist the SQLite DB:
+
+```powershell
+docker build -t queuectl:local .
+docker run --rm -v %cd%\queuectl-data:/data queuectl:local status
+```
+
+- Asciinema / terminal recordings are recommended for short demos; for full screencasts use OBS and a short narrated script.
+
+---
+
+## Troubleshooting
+
+- If job logs are missing, confirm you are running the worker from the repository root so `./job_logs` is created in the expected location.
+- If Click complains about unexpected extra arguments on Windows PowerShell, prefer `--command-file` or build the command string in a variable and pass it as a single argument.
+- For SQLite locked errors, increase busy timeout or ensure no long-running exclusive transactions are active.
+
+---
+
+## Performance considerations
+
+- Start worker count near your CPU core count and adjust based on workload.
+- SQLite is suitable for moderate throughput; for heavy workloads consider an alternative datastore.
+
+---
+
+## Security
+
+- Commands run in shell context: validate inputs and avoid enqueueing untrusted payloads.
+- Protect the DB file and log files with appropriate filesystem permissions.
+
+---
+
+## Acknowledgments
+
+- Built as a small, pragmatic job queue with Python and SQLite.
+
+---
+
+## Demo / Resources
+
+See `README.md` examples above for quick commands and the `tests/` folder for automated checks.
+You can view the demonstration of **QueueCTL** here:  
+[🔗 QueueCTL Demo Video](https://drive.google.com/file/d/17udLc5bh2u8yeUSoG1CAEiG5nlu1qRfV/view?usp=sharing)
